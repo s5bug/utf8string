@@ -95,14 +95,30 @@ final class Utf8String private[utf8string] (private val bytes: Array[Byte]) {
 
 object Utf8String {
 
+  /**
+   * Encode a Java string as a Utf8String.
+   *
+   * In the future, this method may not use StandardCharsets.UTF_8, and instead may opt for the same error-reporting
+   * behavior that will be present in this library.
+   *
+   * @param str the Java string to convert
+   * @return a Utf8String with the same contents as the Java string, modulo encoding errors
+   */
   def apply(str: String): Utf8String = {
     val bytes: Array[Byte] = str.getBytes(StandardCharsets.UTF_8)
     new Utf8String(bytes)
   }
 
+  /**
+   * Convert a byte array to a Utf8String.
+   *
+   * @param bytes the byte array to convert
+   * @return a Utf8String with the same contents as the byte array, modulo encoding errors
+   */
   def apply(bytes: Array[Byte]): Utf8String = {
     val buf = ByteBuffer.wrap(bytes)
 
+    // We want to figure out how big our resulting buffer will be after replacing invalid sequences with U+FFFD
     var result = -1
     var len = 0
     while(len < buf.limit() && result != 0) {
@@ -114,6 +130,7 @@ object Utf8String {
 
     val res = new Array[Byte](len)
 
+    // Then we want to write to our array, replacing invalid things with U+FFFD
     result = -1
     len = 0
     while(len < res.length) {
@@ -128,14 +145,18 @@ object Utf8String {
 
   @tailrec private def continuationLenOrError(buf: ByteBuffer, ex: Int, tg: Int, consume: Boolean): Int = {
     if(ex == 0) {
+      // ex = 0 means there's no extra continuations to take care of, and we're able to write tg bytes
       tg
     } else if(buf.position() < buf.limit()) {
+      // If there's still bytes to write, then check if the next byte is a continuation (i.e. of the form 10xxxxxx)
       val here = buf.get()
       if((here & 0xc0) == 0x80) continuationLenOrError(buf, ex - 1, tg, consume)
       else errorReplacement.length
     } else {
+      // If we need to consume all characters, then the ending is going to be an error replacement character
       if(consume) errorReplacement.length
       else {
+        // Otherwise, we should rewind the buffer to before the incomplete sequence as leftovers
         buf.position(buf.position() - (tg - ex))
         0
       }
@@ -145,6 +166,11 @@ object Utf8String {
   private def validationBufferLength(buf: ByteBuffer, consume: Boolean = true): Int = {
     val here = buf.get()
 
+    // Given a location buffer of bytes, that's potentially UTF-8, we have four outcomes:
+    // 1. The next byte matches an ASCII value, in which case it takes length 1
+    // 2. The next byte is a well-formed Length-N multi-byte sequence, in which case it takes length N
+    // 3. The next byte is a malformed Length-N multi-byte sequence, in which case it takes the error sequence length
+    // 4. The next byte does not match an ASCII value (0xxxxxxx) or a sequence (11xxxxxx), which is an error
     if((here & 0x80) == 0x00) {
       // 0xxxxxxx
       1
@@ -158,13 +184,18 @@ object Utf8String {
   }
 
   @tailrec private def continuationSuccess(buf: ByteBuffer, ex: Int): Boolean = {
+    // Is this continuation well-formed?
     if(ex == 0) {
+      // If we have no more bytes to write, it is
       true
     } else if(buf.position() < buf.limit()) {
       val here = buf.get()
+      // If this byte is a continuation byte, check the rest of the sequence
+      // Otherwise, this sequence is not well-formed
       if((here & 0xc0) == 0x80) continuationSuccess(buf, ex - 1)
       else false
     } else {
+      // If we've run past the end of the buffer, it is not
       false
     }
   }
@@ -194,6 +225,19 @@ object Utf8String {
     }
   }
 
+  /**
+   * Parses as much of a ByteBuffer into a Utf8String as possible.
+   *
+   * This method mutates the <code>position</code> of the ByteBuffer, leaving it at the place it was able to parse up
+   * to. In this way, the remainder of the ByteBuffer represents a "carry", such that a stream of bytes chunked into
+   * ByteBuffers can be transformed into a stream of Utf8Strings without worrying about splits during multi-byte
+   * sequences.
+   *
+   * Invalid sequences will be transformed to U+FFFD.
+   *
+   * @param buf the ByteBuffer to parse from
+   * @return a Utf8String containing as much UTF-8 that was able to be decoded from the ByteBuffer
+   */
   def parse(buf: ByteBuffer): Utf8String = {
     val originalPosition = buf.position()
 
